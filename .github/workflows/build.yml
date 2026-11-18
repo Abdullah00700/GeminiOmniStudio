@@ -1,0 +1,59 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Build debug APK
+        run: |
+          set +e
+          gradle assembleDebug --console=plain > build.log 2>&1
+          echo $? > build.status
+          exit 0
+
+      - name: Publish build report to build-logs branch
+        run: |
+          mkdir -p /tmp/rep
+          {
+            echo "status: $(cat build.status)  commit: $GITHUB_SHA"
+            echo "== e: lines =="
+            grep -E '^e: ' build.log | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/app/src/main/java/com/example/geminidevagent/##' | head -150
+            echo "== what went wrong =="
+            sed -n '/What went wrong/,/\* Try/p' build.log | head -40
+          } > /tmp/rep/errors.txt
+          tail -80 build.log > /tmp/rep/tail.txt
+          cp /tmp/rep/errors.txt "$GITHUB_STEP_SUMMARY"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout --orphan build-logs-tmp
+          git rm -rf --quiet . || true
+          cp /tmp/rep/errors.txt /tmp/rep/tail.txt .
+          git add errors.txt tail.txt
+          git commit -q -m "build report $GITHUB_SHA"
+          git push -f origin HEAD:build-logs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeminiOmniStudio-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
