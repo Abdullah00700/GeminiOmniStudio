@@ -1,0 +1,3 @@
+# Copy this file to local.properties and add your Android SDK path + optional Gemini API key
+# sdk.dir=/Users/yourname/Library/Android/sdk
+GEMINI_API_KEY=
