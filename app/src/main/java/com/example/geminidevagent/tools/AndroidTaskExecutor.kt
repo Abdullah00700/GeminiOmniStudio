@@ -289,17 +289,11 @@ class AndroidTaskExecutor(
         val summary = args.optString("summary", "")
         val items = args.optJSONArray("action_items") ?: JSONArray()
         val md = buildString {
-            append("# $title
-
-$summary
-
-## Action Items
-")
+            append("# $title\n\n$summary\n\n## Action Items\n")
             for (i in 0 until items.length()) {
                 val t = items.optString(i)
                 if (t.isNotBlank()) {
-                    append("- [ ] $t
-")
+                    append("- [ ] $t\n")
                     taskRepository.addTask(t, "From $title", TaskPriority.MEDIUM)
                 }
             }

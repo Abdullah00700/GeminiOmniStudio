@@ -678,7 +678,6 @@ private fun TasksTab(tasks: List<TaskItem>, onToggle: (String) -> Unit, onDelete
                 }
             }
         }
-        }
     }
 }
 
@@ -713,7 +712,6 @@ private fun MemoryTab(memories: List<MemoryItem>, onGenerateFromChat: () -> Unit
                     }
                 }
             }
-        }
         }
     }
 }
