@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "GeminiDevAgent"
+rootProject.name = "GeminiOmniStudio"
 include(":app")

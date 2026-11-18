@@ -1,4 +1,0 @@
-<resources>
-    <string name="app_name">Gemini Dev Agent</string>
-    <string name="accessibility_service_description">Allows Gemini Dev Agent to read and interact with on-screen UI elements only when Screen Control is toggled on and necessary for your task.</string>
-</resources>

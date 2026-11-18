@@ -10,6 +10,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -34,6 +36,32 @@ class GeminiApiClient(
         .build()
 
     private val conversationHistory = JSONArray()
+
+    /** Set by the UI. Returns true if the user approves the sensitive tool call. */
+    var confirmHandler: (suspend (toolName: String, args: JSONObject) -> Boolean)? = null
+
+    private fun needsConfirmation(name: String, args: JSONObject): Boolean = when {
+        name in setOf("run_shell_command", "send_sms", "send_whatsapp_message", "send_whatsapp_file", "workspace_delete_file") -> true
+        name == "http_request" -> args.optString("method", "GET").uppercase() != "GET"
+        name.startsWith("mcp_") -> true
+        else -> false
+    }
+
+    private fun deniedResult() = AndroidTaskExecutor.ExecutionResult(
+        JSONObject().put("error", "User denied this action."), "Denied by user"
+    )
+
+    private fun gatedExecute(name: String, args: JSONObject, allowScreen: Boolean): AndroidTaskExecutor.ExecutionResult {
+        val approvalKey = if (name.startsWith("mcp_")) "mcp_*" else name
+        val skip = settingsRepository.getApprovalSkipAll() || approvalKey in settingsRepository.getAlwaysAllowedTools()
+        if (!skip && needsConfirmation(name, args)) {
+            val handler = confirmHandler
+            val ok = if (handler == null) false else runBlocking { withTimeoutOrNull(60_000L) { handler(name, args) } ?: false }
+            if (!ok) return deniedResult()
+        }
+        return if (name.startsWith("mcp_")) McpClient.callTool(name, args)
+        else toolExecutor.execute(name, args, allowScreenControl = allowScreen)
+    }
 
     data class AgentStep(
         val finalText: String,
@@ -145,8 +173,7 @@ class GeminiApiClient(
                             val args = call.optJSONObject("args") ?: JSONObject()
                             val res = when {
                                 name == "spawn_subagent" -> runSubagent(keys, modelName, args.optString("role", "Specialist"), args.optString("task", ""), toggles)
-                                name.startsWith("mcp_") -> McpClient.callTool(name, args)
-                                else -> toolExecutor.execute(name, args, allowScreenControl = includeScreenTools)
+                                else -> gatedExecute(name, args, includeScreenTools)
                             }
                             if (name in setOf("open_app", "tap_on_screen", "scroll_screen", "press_navigation")) delay(650)
                             name to res
@@ -223,7 +250,7 @@ class GeminiApiClient(
             }
             val respParts = JSONArray()
             calls.forEach { c ->
-                val res = toolExecutor.execute(c.getString("name"), c.optJSONObject("args") ?: JSONObject(), allowScreenControl = false)
+                val res = gatedExecute(c.getString("name"), c.optJSONObject("args") ?: JSONObject(), false)
                 respParts.put(JSONObject().put("functionResponse", JSONObject().put("name", c.getString("name")).put("response", res.responseJson)))
             }
             subHistory.put(JSONObject().put("role", "user").put("parts", respParts))

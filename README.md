@@ -1,25 +1,29 @@
-# Gemini Dev Agent (Android)
+# Gemini Omni Studio (Android)
 
-An Android app built with **Kotlin** and **Jetpack Compose (Material 3)** that acts as a personal task assistant powered by the **Gemini API** (`v1beta/models/{model}:generateContent`) using **Function Calling**.
+A Kotlin + Jetpack Compose agent app powered by the Gemini API with function calling. It can act on your phone and in an in-app workspace.
 
-## What It Can Do
-Ask Gemini in natural language, and it will automatically choose and execute the right action on your phone or in your in-app task list:
-- **Manage In-App Tasks**: Add, list, complete, and delete tasks with priority (`LOW`, `MEDIUM`, `HIGH`) and due labels.
-- **Set Alarms & Timers**: Triggers Android's native Clock app (`AlarmClock.ACTION_SET_ALARM` / `ACTION_SET_TIMER`).
-- **Create Calendar Events**: Opens your Calendar app pre-filled with title, description, and location (`CalendarContract.Events`).
-- **Compose Emails**: Opens your Email app pre-filled with recipient, subject, and body (`ACTION_SENDTO`).
-- **Web Search**: Opens a Google search in your browser (`ACTION_VIEW`).
+## Features
+- ~50 tools: alarms, timers, calendar, email, SMS, WhatsApp, apps, flashlight, maps, music
+- Screen control via AccessibilityService (read, tap, type, scroll) when toggled on
+- Workspace: read/write/edit/search files, shell commands, HTTP requests, GitHub reads
+- Generates PDFs, Word-compatible docs, spreadsheets, slide decks, meeting notes
+- Persistent memory, tasks, subagents, and a remote MCP client
+- Multiple API keys with failover, selectable model, Fast/Plan/Max modes
+- Approval dialog before sensitive actions (shell, SMS, WhatsApp, file delete, non-GET HTTP, MCP tools)
 
-## Quick Start in Android Studio
-1. Open the `GeminiDevAgent` folder in **Android Studio** (Ladybug / Meerkat or newer, JDK 17).
-2. Let Gradle sync.
-3. Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey).
-4. **Option A (In-App — Easiest)**: Run the app on an emulator or device, tap the **Settings (gear)** icon in the top bar, and paste your Gemini API key.
-5. **Option B (BuildConfig)**: Copy `local.properties.example` to `local.properties` and set:
-   ```properties
-   GEMINI_API_KEY=your_api_key_here
-   ```
-6. Default model is `gemini-flash-latest` (configurable in Settings).
+## Setup
+1. Open this folder in Android Studio (JDK 17) and let Gradle sync.
+2. Get a key at https://aistudio.google.com/apikey.
+3. Paste it in the app under Settings, or copy `local.properties.example` to `local.properties` and set `GEMINI_API_KEY`.
 
-## Production Security Note
-For production apps distributed on Google Play, Google recommends using [Firebase AI Logic](https://firebase.google.com/docs/ai-logic/get-started) (`com.google.firebase:firebase-ai`) with Firebase App Check instead of shipping a raw Gemini API key in the client APK. This project uses direct REST calls with user-supplied keys so you can test and run it immediately without setting up a Firebase project.
+## Security notes
+- Keys entered in the app are stored in app-private SharedPreferences (backup disabled). Never commit `local.properties`.
+- A key set in `local.properties` is compiled into the APK; do not distribute such builds.
+- Screen control and shell access are powerful. Web content can try to steer the model, so review approval prompts.
+- For Play Store distribution, use Firebase AI Logic with App Check instead of client-held keys, and review Google's AccessibilityService policy.
+
+## License
+MIT
+
+## Build without Android Studio
+Push to GitHub and the **Build APK** workflow runs automatically (or run it from the Actions tab). Download `GeminiOmniStudio-debug-apk` from the run's Artifacts and install the APK on your phone.

@@ -25,7 +25,11 @@ import com.example.geminidevagent.model.TaskItem
 import com.example.geminidevagent.tools.AndroidTaskExecutor
 import com.example.geminidevagent.tools.McpClient
 import com.example.geminidevagent.tools.McpServerConfig
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +48,26 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         application, workspaceRepository, taskRepository, memoryRepository, settingsRepository, artifactRepository
     )
     private val geminiClient = GeminiApiClient(executor, settingsRepository, memoryRepository)
+
+    data class PendingConfirm(val tool: String, val details: String, val decision: CompletableDeferred<Boolean>)
+
+    private val _pendingConfirm = MutableStateFlow<PendingConfirm?>(null)
+    val pendingConfirm: StateFlow<PendingConfirm?> = _pendingConfirm.asStateFlow()
+    private val confirmMutex = Mutex()
+
+    init {
+        geminiClient.confirmHandler = { tool, args ->
+            confirmMutex.withLock {
+                val d = CompletableDeferred<Boolean>()
+                _pendingConfirm.value = PendingConfirm(tool, args.toString(2).take(1200), d)
+                try { d.await() } finally { _pendingConfirm.value = null }
+            }
+        }
+    }
+
+    fun resolveConfirm(approved: Boolean) {
+        _pendingConfirm.value?.decision?.complete(approved)
+    }
 
     val workspaceFiles: StateFlow<List<WorkspaceFile>> = workspaceRepository.files
     val tasks: StateFlow<List<TaskItem>> = taskRepository.tasks
@@ -125,6 +149,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun isAccessibilityConnected(): Boolean = AssistantAccessibilityService.isConnected()
+    fun getApprovalSkipAll(): Boolean = settingsRepository.getApprovalSkipAll()
+    fun getAlwaysAllowedTools(): Set<String> = settingsRepository.getAlwaysAllowedTools()
+    fun saveApproval(skipAll: Boolean, allowed: Set<String>) = settingsRepository.saveApproval(skipAll, allowed)
+    fun alwaysAllow(tool: String) {
+        settingsRepository.addAlwaysAllowed(if (tool.startsWith("mcp_")) "mcp_*" else tool)
+        resolveConfirm(true)
+    }
+
     fun getGithubToken(): String = settingsRepository.getGithubToken()
     fun getWhatsAppContacts(): Map<String, String> = settingsRepository.getWhatsAppContacts()
     fun saveWhatsAppContacts(c: Map<String, String>) = settingsRepository.saveWhatsAppContacts(c)

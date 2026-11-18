@@ -177,6 +177,21 @@ fun AssistantScreen(viewModel: AssistantViewModel) {
     var selectedTab by remember { mutableIntStateOf(0) } // 0=Playground, 1=Build Workspace, 2=Tasks, 3=Memory
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showModelSelector by remember { mutableStateOf(false) }
+    val pendingConfirm by viewModel.pendingConfirm.collectAsState()
+    pendingConfirm?.let { pc ->
+        AlertDialog(
+            onDismissRequest = { viewModel.resolveConfirm(false) },
+            title = { Text("Allow ${pc.tool}?") },
+            text = { Text(pc.details) },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { viewModel.alwaysAllow(pc.tool) }) { Text("Always allow") }
+                    TextButton(onClick = { viewModel.resolveConfirm(true) }) { Text("Allow") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { viewModel.resolveConfirm(false) }) { Text("Deny") } }
+        )
+    }
 
     val messages by viewModel.messages.collectAsState()
     val files by viewModel.workspaceFiles.collectAsState()
@@ -314,6 +329,9 @@ fun AssistantScreen(viewModel: AssistantViewModel) {
             initialMcpServers = viewModel.getMcpServers(),
             initialScreenControl = screenControlEnabled,
             initialToggles = featureToggles,
+            initialApprovalSkipAll = viewModel.getApprovalSkipAll(),
+            initialAlwaysAllowed = viewModel.getAlwaysAllowedTools(),
+            onSaveApproval = { skip, allowed -> viewModel.saveApproval(skip, allowed) },
             linkedAccount = linkedAccount,
             isAccessibilityConnected = viewModel.isAccessibilityConnected(),
             onUnlinkAccount = { viewModel.unlinkAccount(); showSettingsDialog = false },
@@ -763,6 +781,9 @@ private fun SettingsDialog(
     initialMcpServers: List<McpServerConfig>,
     initialScreenControl: Boolean,
     initialToggles: Map<String, Boolean>,
+    initialApprovalSkipAll: Boolean,
+    initialAlwaysAllowed: Set<String>,
+    onSaveApproval: (Boolean, Set<String>) -> Unit,
     linkedAccount: Pair<String, String>?,
     isAccessibilityConnected: Boolean,
     onSaveWaContacts: (Map<String, String>) -> Unit,
@@ -783,6 +804,8 @@ private fun SettingsDialog(
     var mcpName by remember { mutableStateOf("") }
     var mcpUrl by remember { mutableStateOf("") }
     var screenControl by remember { mutableStateOf(initialScreenControl) }
+    var approvalSkipAll by remember { mutableStateOf(initialApprovalSkipAll) }
+    val alwaysAllowed = remember { mutableStateListOf<String>().apply { addAll(initialAlwaysAllowed) } }
     val toggles = remember { mutableStateMapOf<String, Boolean>().apply { putAll(initialToggles) } }
     val context = LocalContext.current
 
@@ -877,6 +900,21 @@ private fun SettingsDialog(
                     Text("Screen Control (Accessibility)", style = MaterialTheme.typography.bodySmall)
                     Switch(checked = screenControl, onCheckedChange = { screenControl = it })
                 }
+                HorizontalDivider()
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Skip ALL approvals (risky)", style = MaterialTheme.typography.bodySmall)
+                    Switch(checked = approvalSkipAll, onCheckedChange = { approvalSkipAll = it })
+                }
+                if (!approvalSkipAll) {
+                    Text("Auto-allow without asking:", style = MaterialTheme.typography.labelSmall)
+                    listOf("run_shell_command", "send_sms", "send_whatsapp_message", "send_whatsapp_file", "workspace_delete_file", "http_request", "mcp_*").forEach { t ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(t, style = MaterialTheme.typography.bodySmall)
+                            Switch(checked = t in alwaysAllowed, onCheckedChange = { on -> if (on) { if (t !in alwaysAllowed) alwaysAllowed.add(t) } else alwaysAllowed.remove(t) })
+                        }
+                    }
+                }
+                HorizontalDivider()
                 if (screenControl && !isAccessibilityConnected) {
                     OutlinedButton(onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }, modifier = Modifier.fillMaxWidth()) {
                         Text("Enable in Android Settings")
@@ -888,7 +926,7 @@ private fun SettingsDialog(
             Button(onClick = {
                 val finalKeys = keys.toMutableList()
                 newKey.trim().takeIf { it.isNotEmpty() && !finalKeys.contains(it) }?.let { finalKeys.add(it) }
-                onSaveWaContacts(waContacts.toMap()); onSaveMcpServers(mcpServers.toList()); onSave(finalKeys, model, instr, ghToken, screenControl, toggles.toMap())
+                onSaveApproval(approvalSkipAll, alwaysAllowed.toSet()); onSaveWaContacts(waContacts.toMap()); onSaveMcpServers(mcpServers.toList()); onSave(finalKeys, model, instr, ghToken, screenControl, toggles.toMap())
             }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }

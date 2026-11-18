@@ -73,6 +73,13 @@ class SettingsRepository(context: Context) {
     fun isVoiceModeEnabled(): Boolean = prefs.getBoolean(KEY_VOICE_MODE, false)
     fun setVoiceModeEnabled(enabled: Boolean) = prefs.edit().putBoolean(KEY_VOICE_MODE, enabled).apply()
 
+    /** Approval filter: skip all prompts, or auto-allow chosen tools. Keys: tool name, "mcp_*" for MCP tools. */
+    fun getApprovalSkipAll(): Boolean = prefs.getBoolean(KEY_APPROVAL_SKIP_ALL, false)
+    fun getAlwaysAllowedTools(): Set<String> = prefs.getStringSet(KEY_ALWAYS_ALLOWED, emptySet())?.toSet().orEmpty()
+    fun saveApproval(skipAll: Boolean, allowed: Set<String>) =
+        prefs.edit().putBoolean(KEY_APPROVAL_SKIP_ALL, skipAll).putStringSet(KEY_ALWAYS_ALLOWED, allowed).apply()
+    fun addAlwaysAllowed(key: String) = prefs.edit().putStringSet(KEY_ALWAYS_ALLOWED, getAlwaysAllowedTools() + key).apply()
+
     fun getGithubToken(): String = prefs.getString(KEY_GITHUB_TOKEN, "")?.trim().orEmpty()
     fun saveGithubToken(token: String) = prefs.edit().putString(KEY_GITHUB_TOKEN, token.trim()).apply()
 
@@ -146,6 +153,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_ACTIVE_INDEX = "active_key_index"
         private const val KEY_MODEL_NAME = "model_name"
         private const val KEY_CUSTOM_INSTR = "custom_instructions"
+        private const val KEY_APPROVAL_SKIP_ALL = "approval_skip_all"
+        private const val KEY_ALWAYS_ALLOWED = "approval_always_allowed"
         private const val KEY_ACC_NAME = "acc_name"
         private const val KEY_ACC_EMAIL = "acc_email"
         private const val KEY_SCREEN_CONTROL = "screen_control_enabled"
