@@ -9,6 +9,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.geminidevagent.accessibility.AssistantAccessibilityService
 import com.example.geminidevagent.data.AgentMode
+import com.example.geminidevagent.data.AiProvider
+import com.example.geminidevagent.data.ApiKeyDetector
+import com.example.geminidevagent.data.ApiKeyEntry
 import com.example.geminidevagent.data.ArtifactItem
 import com.example.geminidevagent.data.ArtifactRepository
 import com.example.geminidevagent.data.GeminiApiClient
@@ -77,27 +80,39 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _agentMode = MutableStateFlow(AgentMode.FAST)
     val agentMode: StateFlow<AgentMode> = _agentMode.asStateFlow()
 
-    private val _apiKeys = MutableStateFlow(settingsRepository.getApiKeys())
+    private val _keyEntries = MutableStateFlow(settingsRepository.getKeyEntries())
+    val keyEntries: StateFlow<List<ApiKeyEntry>> = _keyEntries.asStateFlow()
+
+    private val _apiKeys = MutableStateFlow(_keyEntries.value.map { it.key })
     val apiKeys: StateFlow<List<String>> = _apiKeys.asStateFlow()
 
     private val _activeKeyIndex = MutableStateFlow(settingsRepository.getActiveKeyIndex())
     val activeKeyIndex: StateFlow<Int> = _activeKeyIndex.asStateFlow()
 
-    private val _activeModel = MutableStateFlow(settingsRepository.getModelName())
+    private fun resolveProviderFor(entries: List<ApiKeyEntry>, index: Int): AiProvider {
+        if (entries.isEmpty()) return AiProvider.GEMINI
+        return entries[index.coerceIn(0, entries.lastIndex)].provider
+    }
+
+    private val _activeProvider = MutableStateFlow(resolveProviderFor(_keyEntries.value, _activeKeyIndex.value))
+    val activeProvider: StateFlow<AiProvider> = _activeProvider.asStateFlow()
+
+    private val _activeModel = MutableStateFlow(
+        settingsRepository.getModelName().let { saved ->
+            val p = _activeProvider.value
+            if (_keyEntries.value.isEmpty() || ApiKeyDetector.isModelCompatible(saved, p)) saved else p.defaultModel
+        }
+    )
     val activeModel: StateFlow<String> = _activeModel.asStateFlow()
 
-    private val _availableModels = MutableStateFlow(
-        listOf(
-            "gemini-4-hydrogen",
-            "gemini-4-carbon",
-            "gemini-4-argon",
-            "gemini-flash-latest",
-            "gemini-3.8-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-image"
-        )
-    )
+    private val _availableModels = MutableStateFlow(_activeProvider.value.defaultModels)
     val availableModels: StateFlow<List<String>> = _availableModels.asStateFlow()
+
+    private val _isDetectingKey = MutableStateFlow(false)
+    val isDetectingKey: StateFlow<Boolean> = _isDetectingKey.asStateFlow()
+
+    private val _keyDetectionStatus = MutableStateFlow<String?>(null)
+    val keyDetectionStatus: StateFlow<String?> = _keyDetectionStatus.asStateFlow()
 
     private val _linkedAccount = MutableStateFlow(settingsRepository.getLinkedAccount())
     val linkedAccount: StateFlow<Pair<String, String>?> = _linkedAccount.asStateFlow()
@@ -113,6 +128,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _voiceModeEnabled = MutableStateFlow(settingsRepository.isVoiceModeEnabled())
     val voiceModeEnabled: StateFlow<Boolean> = _voiceModeEnabled.asStateFlow()
+
+    private val _isLightMode = MutableStateFlow(settingsRepository.isLightMode())
+    val isLightMode: StateFlow<Boolean> = _isLightMode.asStateFlow()
 
     private val _pendingAttachment = MutableStateFlow<AttachmentData?>(null)
     val pendingAttachment: StateFlow<AttachmentData?> = _pendingAttachment.asStateFlow()
@@ -181,6 +199,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         if (!next) tts.stop()
     }
 
+    fun toggleLightMode() = setLightMode(!_isLightMode.value)
+
+    fun setLightMode(enabled: Boolean) {
+        settingsRepository.setLightMode(enabled)
+        _isLightMode.value = enabled
+    }
+
     fun linkAccount(name: String, email: String) {
         if (email.isBlank() || !email.contains("@")) return
         settingsRepository.saveLinkedAccount(name, email)
@@ -193,16 +218,75 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun selectModel(modelName: String) {
-        val cleaned = modelName.trim().ifEmpty { SettingsRepository.DEFAULT_MODEL }
+        val cleaned = modelName.trim().ifEmpty { _activeProvider.value.defaultModel }
         settingsRepository.saveModelName(cleaned)
         _activeModel.value = settingsRepository.getModelName()
     }
 
+    fun selectActiveKey(index: Int) {
+        val entries = _keyEntries.value
+        if (entries.isEmpty()) return
+        val clamped = index.coerceIn(0, entries.lastIndex)
+        settingsRepository.setActiveKeyIndex(clamped)
+        _activeKeyIndex.value = clamped
+        val provider = entries[clamped].provider
+        _activeProvider.value = provider
+        _availableModels.value = provider.defaultModels
+        if (!ApiKeyDetector.isModelCompatible(_activeModel.value, provider)) {
+            selectModel(provider.defaultModel)
+        }
+        refreshModelsFromApi()
+    }
+
+    fun clearKeyDetectionStatus() {
+        _keyDetectionStatus.value = null
+    }
+
+    fun detectAndAddKey(
+        rawKey: String,
+        overrideProvider: AiProvider? = null,
+        onAdded: (ApiKeyEntry, List<String>) -> Unit = { _, _ -> }
+    ) {
+        val cleaned = rawKey.trim()
+        if (cleaned.isEmpty() || _isDetectingKey.value) return
+        _isDetectingKey.value = true
+        _keyDetectionStatus.value = "Detecting key & fetching models..."
+        viewModelScope.launch {
+            val result = geminiClient.detectAndFetchModels(cleaned, overrideProvider)
+            val current = _keyEntries.value.toMutableList()
+            val existingIdx = current.indexOfFirst { it.key == result.entry.key }
+            val targetIdx = if (existingIdx >= 0) {
+                current[existingIdx] = result.entry
+                existingIdx
+            } else {
+                current.add(result.entry)
+                current.lastIndex
+            }
+            settingsRepository.saveKeyEntries(current, targetIdx)
+            _keyEntries.value = settingsRepository.getKeyEntries()
+            _apiKeys.value = _keyEntries.value.map { it.key }
+            _activeKeyIndex.value = settingsRepository.getActiveKeyIndex()
+            _activeProvider.value = result.entry.provider
+            _availableModels.value = result.models
+            if (!ApiKeyDetector.isModelCompatible(_activeModel.value, result.entry.provider)) {
+                val preferred = result.models.firstOrNull {
+                    it == result.entry.provider.defaultModel
+                } ?: result.entry.provider.defaultModel
+                selectModel(preferred)
+            }
+            _keyDetectionStatus.value = result.note
+            _isDetectingKey.value = false
+            onAdded(result.entry, result.models)
+        }
+    }
+
     fun refreshModelsFromApi() {
+        val provider = _activeProvider.value
+        _availableModels.value = provider.defaultModels
         viewModelScope.launch {
             geminiClient.fetchAvailableModels().onSuccess { fetched ->
                 if (fetched.isNotEmpty()) {
-                    _availableModels.value = (fetched + _availableModels.value).distinct()
+                    _availableModels.value = (fetched + provider.defaultModels).distinct()
                     _activeKeyIndex.value = settingsRepository.getActiveKeyIndex()
                 }
             }
@@ -229,26 +313,40 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun clearAttachment() { _pendingAttachment.value = null }
 
     fun saveSettings(
-        keys: List<String>,
+        entries: List<ApiKeyEntry>,
+        activeIndex: Int,
         modelName: String,
         customInstr: String,
         githubToken: String,
         screenControl: Boolean,
         toggles: Map<String, Boolean>
     ) {
-        settingsRepository.saveApiKeys(keys)
-        settingsRepository.saveModelName(modelName)
+        settingsRepository.saveKeyEntries(entries, activeIndex)
+        val savedEntries = settingsRepository.getKeyEntries()
+        val savedIdx = settingsRepository.getActiveKeyIndex()
+        val provider = resolveProviderFor(savedEntries, savedIdx)
+        val resolvedModel = if (savedEntries.isEmpty() || ApiKeyDetector.isModelCompatible(modelName, provider)) {
+            modelName.trim().ifEmpty { provider.defaultModel }
+        } else {
+            provider.defaultModel
+        }
+
+        settingsRepository.saveModelName(resolvedModel)
         settingsRepository.saveCustomInstructions(customInstr)
         settingsRepository.saveGithubToken(githubToken)
         settingsRepository.setScreenControlEnabled(screenControl)
         settingsRepository.saveFeatureToggles(toggles)
 
-        _apiKeys.value = settingsRepository.getApiKeys()
-        _activeKeyIndex.value = settingsRepository.getActiveKeyIndex()
+        _keyEntries.value = savedEntries
+        _apiKeys.value = savedEntries.map { it.key }
+        _activeKeyIndex.value = savedIdx
+        _activeProvider.value = provider
         _activeModel.value = settingsRepository.getModelName()
+        _availableModels.value = provider.defaultModels
         _customInstructions.value = settingsRepository.getCustomInstructions()
         _screenControlEnabled.value = screenControl
         _featureToggles.value = toggles
+        if (savedEntries.isNotEmpty()) refreshModelsFromApi()
     }
 
     fun generateMemoryFromChat() {

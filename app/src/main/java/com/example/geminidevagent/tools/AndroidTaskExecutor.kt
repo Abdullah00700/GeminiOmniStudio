@@ -26,6 +26,8 @@ import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.example.geminidevagent.data.AiProvider
+import com.example.geminidevagent.data.ApiKeyDetector
 import com.example.geminidevagent.data.ArtifactRepository
 import com.example.geminidevagent.data.ArtifactType
 import com.example.geminidevagent.data.MemoryRepository
@@ -467,54 +469,87 @@ class AndroidTaskExecutor(
 
     private fun handleWebSearch(args: JSONObject): ExecutionResult {
         val query = args.optString("query", "").trim()
-        val keys = settingsRepository.getApiKeys()
-        if (keys.isEmpty()) {
-            return ExecutionResult(JSONObject().put("error", "No Gemini API key configured for Google Search."), "Missing API key")
-        }
-        val model = settingsRepository.getModelName()
-        val payload = JSONObject().apply {
-            put("contents", JSONArray().put(
-                JSONObject().put("role", "user").put("parts", JSONArray().put(
-                    JSONObject().put("text", "Search Google and return accurate, concise facts with details for: $query")
+        val geminiKeys = settingsRepository.getKeyEntries().filter { it.provider == AiProvider.GEMINI }
+        if (geminiKeys.isNotEmpty()) {
+            val configuredModel = settingsRepository.getModelName()
+            val model = if (ApiKeyDetector.isModelCompatible(configuredModel, AiProvider.GEMINI)) {
+                configuredModel
+            } else {
+                AiProvider.GEMINI.defaultModel
+            }
+            val payload = JSONObject().apply {
+                put("contents", JSONArray().put(
+                    JSONObject().put("role", "user").put("parts", JSONArray().put(
+                        JSONObject().put("text", "Search Google and return accurate, concise facts with details for: $query")
+                    ))
                 ))
-            ))
-            put("tools", JSONArray().put(JSONObject().put("googleSearch", JSONObject())))
-        }.toString()
+                put("tools", JSONArray().put(JSONObject().put("googleSearch", JSONObject())))
+            }.toString()
 
-        val startIdx = settingsRepository.getActiveKeyIndex().coerceIn(0, keys.lastIndex)
-        for (offset in keys.indices) {
-            val idx = (startIdx + offset) % keys.size
-            try {
-                val req = Request.Builder()
-                    .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
-                    .addHeader("x-goog-api-key", keys[idx])
-                    .addHeader("Content-Type", "application/json")
-                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull()))
-                    .build()
-                httpClient.newCall(req).execute().use { resp ->
-                    val raw = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) continue
-                    val json = JSONObject(raw)
-                    val cand = json.optJSONArray("candidates")?.optJSONObject(0) ?: continue
-                    val parts = cand.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
-                    val summary = (0 until parts.length()).mapNotNull { parts.optJSONObject(it)?.optString("text")?.takeIf { t -> t.isNotBlank() } }.joinToString("\n")
-                    val sources = JSONArray()
-                    val chunks = cand.optJSONObject("groundingMetadata")?.optJSONArray("groundingChunks") ?: JSONArray()
-                    for (i in 0 until minOf(chunks.length(), 6)) {
-                        val web = chunks.optJSONObject(i)?.optJSONObject("web") ?: continue
-                        sources.put(JSONObject().put("title", web.optString("title")).put("url", web.optString("uri")))
+            for (entry in geminiKeys) {
+                try {
+                    val req = Request.Builder()
+                        .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+                        .addHeader("x-goog-api-key", entry.key)
+                        .addHeader("Content-Type", "application/json")
+                        .post(payload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull()))
+                        .build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        val raw = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) return@use
+                        val json = JSONObject(raw)
+                        val cand = json.optJSONArray("candidates")?.optJSONObject(0) ?: return@use
+                        val parts = cand.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
+                        val summary = (0 until parts.length()).mapNotNull { parts.optJSONObject(it)?.optString("text")?.takeIf { t -> t.isNotBlank() } }.joinToString("\n")
+                        val sources = JSONArray()
+                        val chunks = cand.optJSONObject("groundingMetadata")?.optJSONArray("groundingChunks") ?: JSONArray()
+                        for (i in 0 until minOf(chunks.length(), 6)) {
+                            val web = chunks.optJSONObject(i)?.optJSONObject("web") ?: continue
+                            sources.put(JSONObject().put("title", web.optString("title")).put("url", web.optString("uri")))
+                        }
+                        return ExecutionResult(
+                            JSONObject().put("query", query).put("summary", summary).put("sources", sources),
+                            "Google Search: '$query' (${sources.length()} sources)"
+                        )
                     }
-                    if (idx != startIdx) settingsRepository.setActiveKeyIndex(idx)
-                    return ExecutionResult(
-                        JSONObject().put("query", query).put("summary", summary).put("sources", sources),
-                        "Google Search: '$query' (${sources.length()} sources)"
-                    )
+                } catch (_: Exception) {
+                    continue
                 }
-            } catch (_: Exception) {
-                continue
             }
         }
-        return ExecutionResult(JSONObject().put("error", "Google Search failed across configured API keys."), "Google Search failed")
+
+        // Fallback web search via DuckDuckGo Instant Answer API when using Claude/Kimi/ChatGPT without a Gemini key
+        return try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val req = Request.Builder()
+                .url("https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1")
+                .header("User-Agent", "OmniStudio-Android/1.0")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                val json = JSONObject(raw)
+                val abstractText = json.optString("AbstractText").trim()
+                val abstractUrl = json.optString("AbstractURL").trim()
+                val related = json.optJSONArray("RelatedTopics") ?: JSONArray()
+                val snippets = buildList {
+                    if (abstractText.isNotEmpty()) add(abstractText)
+                    for (i in 0 until minOf(related.length(), 5)) {
+                        val t = related.optJSONObject(i)?.optString("Text")?.trim().orEmpty()
+                        if (t.isNotEmpty()) add(t)
+                    }
+                }
+                ExecutionResult(
+                    JSONObject()
+                        .put("query", query)
+                        .put("summary", snippets.joinToString("\n").ifBlank { "No instant summary; use fetch_webpage on a specific URL." })
+                        .put("source_url", abstractUrl),
+                    "Web Search: '$query'"
+                )
+            }
+        } catch (e: Exception) {
+            ExecutionResult(JSONObject().put("error", "Web search failed: ${e.message}"), "Web search failed")
+        }
     }
 
     private fun handleFetchWebpage(args: JSONObject): ExecutionResult {

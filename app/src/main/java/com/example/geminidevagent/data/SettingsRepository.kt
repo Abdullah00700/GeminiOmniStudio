@@ -10,33 +10,94 @@ class SettingsRepository(context: Context) {
 
     private val prefs = context.getSharedPreferences("gemini_omni_settings", Context.MODE_PRIVATE)
 
-    fun getApiKeys(): List<String> {
-        val raw = prefs.getString(KEY_API_KEYS_JSON, null)
-        val parsed = if (!raw.isNullOrBlank()) {
+    fun getKeyEntries(): List<ApiKeyEntry> {
+        val rawEntries = prefs.getString(KEY_API_KEY_ENTRIES_JSON, null)
+        val parsedEntries = if (!rawEntries.isNullOrBlank()) {
             runCatching {
-                val arr = JSONArray(raw)
+                val arr = JSONArray(rawEntries)
                 buildList {
                     for (i in 0 until arr.length()) {
-                        val k = arr.getString(i).trim()
-                        if (k.isNotEmpty()) add(k)
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val k = obj.optString("key").trim()
+                        if (k.isNotEmpty()) {
+                            val p = AiProvider.fromNameOrNull(obj.optString("provider"))
+                                ?: ApiKeyDetector.inferProviderOrFallback(k)
+                            val base = obj.optString("baseUrl").trim().ifEmpty { null }
+                            add(ApiKeyEntry(k, p, base))
+                        }
                     }
                 }
             }.getOrDefault(emptyList())
         } else emptyList()
 
-        if (parsed.isNotEmpty()) return parsed
+        if (parsedEntries.isNotEmpty()) return parsedEntries
+
+        val legacy = getLegacyApiKeys()
+        if (legacy.isNotEmpty()) {
+            return legacy.map { k -> ApiKeyEntry(k, ApiKeyDetector.inferProviderOrFallback(k)) }
+        }
+
         val buildKey = BuildConfig.GEMINI_API_KEY.trim()
-        return if (buildKey.isNotEmpty()) listOf(buildKey) else emptyList()
+        return if (buildKey.isNotEmpty()) {
+            listOf(ApiKeyEntry(buildKey, ApiKeyDetector.inferProviderOrFallback(buildKey)))
+        } else emptyList()
     }
 
+    private fun getLegacyApiKeys(): List<String> {
+        val raw = prefs.getString(KEY_API_KEYS_JSON, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val k = arr.getString(i).trim()
+                    if (k.isNotEmpty()) add(k)
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveKeyEntries(entries: List<ApiKeyEntry>, activeIndex: Int = 0) {
+        val cleaned = entries
+            .map { it.copy(key = it.key.trim()) }
+            .filter { it.key.isNotEmpty() }
+            .distinctBy { it.key }
+        val arr = JSONArray().apply {
+            cleaned.forEach { e ->
+                put(JSONObject().apply {
+                    put("key", e.key)
+                    put("provider", e.provider.name)
+                    if (!e.baseUrlOverride.isNullOrBlank()) put("baseUrl", e.baseUrlOverride)
+                })
+            }
+        }
+        val legacyArr = JSONArray().apply { cleaned.forEach { put(it.key) } }
+        val clampedIdx = if (cleaned.isEmpty()) 0 else activeIndex.coerceIn(0, cleaned.lastIndex)
+        prefs.edit()
+            .putString(KEY_API_KEY_ENTRIES_JSON, arr.toString())
+            .putString(KEY_API_KEYS_JSON, legacyArr.toString())
+            .putInt(KEY_ACTIVE_INDEX, clampedIdx)
+            .apply()
+    }
+
+    fun getActiveKeyEntry(): ApiKeyEntry? {
+        val entries = getKeyEntries()
+        if (entries.isEmpty()) return null
+        val idx = prefs.getInt(KEY_ACTIVE_INDEX, 0).coerceIn(0, entries.lastIndex)
+        return entries[idx]
+    }
+
+    fun getApiKeys(): List<String> = getKeyEntries().map { it.key }
+
     fun saveApiKeys(keys: List<String>) {
-        val cleaned = keys.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-        val arr = JSONArray().apply { cleaned.forEach { put(it) } }
-        prefs.edit().putString(KEY_API_KEYS_JSON, arr.toString()).putInt(KEY_ACTIVE_INDEX, 0).apply()
+        val existingByKey = getKeyEntries().associateBy { it.key }
+        val entries = keys.map { it.trim() }.filter { it.isNotEmpty() }.distinct().map { k ->
+            existingByKey[k] ?: ApiKeyEntry(k, ApiKeyDetector.inferProviderOrFallback(k))
+        }
+        saveKeyEntries(entries, 0)
     }
 
     fun getActiveKeyIndex(): Int {
-        val keys = getApiKeys()
+        val keys = getKeyEntries()
         if (keys.isEmpty()) return 0
         return prefs.getInt(KEY_ACTIVE_INDEX, 0).coerceIn(0, keys.lastIndex)
     }
@@ -72,6 +133,9 @@ class SettingsRepository(context: Context) {
 
     fun isVoiceModeEnabled(): Boolean = prefs.getBoolean(KEY_VOICE_MODE, false)
     fun setVoiceModeEnabled(enabled: Boolean) = prefs.edit().putBoolean(KEY_VOICE_MODE, enabled).apply()
+
+    fun isLightMode(): Boolean = prefs.getBoolean(KEY_LIGHT_MODE, false)
+    fun setLightMode(enabled: Boolean) = prefs.edit().putBoolean(KEY_LIGHT_MODE, enabled).apply()
 
     /** Approval filter: skip all prompts, or auto-allow chosen tools. Keys: tool name, "mcp_*" for MCP tools. */
     fun getApprovalSkipAll(): Boolean = prefs.getBoolean(KEY_APPROVAL_SKIP_ALL, false)
@@ -150,6 +214,7 @@ class SettingsRepository(context: Context) {
 
     companion object {
         private const val KEY_API_KEYS_JSON = "api_keys_json"
+        private const val KEY_API_KEY_ENTRIES_JSON = "api_key_entries_json"
         private const val KEY_ACTIVE_INDEX = "active_key_index"
         private const val KEY_MODEL_NAME = "model_name"
         private const val KEY_CUSTOM_INSTR = "custom_instructions"
@@ -159,6 +224,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_ACC_EMAIL = "acc_email"
         private const val KEY_SCREEN_CONTROL = "screen_control_enabled"
         private const val KEY_VOICE_MODE = "voice_mode_enabled"
+        private const val KEY_LIGHT_MODE = "light_mode_enabled"
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_TOGGLES = "feature_toggles"
         const val DEFAULT_MODEL = "gemini-4-hydrogen"
